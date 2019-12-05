@@ -1,87 +1,93 @@
-from flask import Flask, render_template, send_from_directory, request
-# import numpy as np
-from alpha_vantage.timeseries import TimeSeries
-import matplotlib.pyplot as plt
+import os
+import csv
+import os.path
+import datetime
+import numpy as np
 import pandas as pd
-# import tensorflow as tf
-import json
-# from sklearn.preprocessing import MinMaxScaler
+from pathlib import Path
+from fbprophet import Prophet
+from itertools import zip_longest
+from flask import request, redirect
+import pandas_datareader.data as web
+from flask import Flask, render_template
+
 app = Flask(__name__)
 
 @app.route('/')
 def index():
 	return render_template("index.html")
 
-# @app.route('/google')
-# def predict_google():
-# 	# name = request.args.get("name")
-# 	dataset_train = pd.read_csv('Google_Stock_Price_Train.csv')
-# 	training_set = dataset_train.iloc[:, 1:2].values
-# 	sc = MinMaxScaler(feature_range = (0, 1))
-# 	training_set_scaled = sc.fit_transform(training_set)
+@app.after_request
+def add_header(response):
+    response.headers['X-UA-Compatible'] = 'IE=Edge,chrome=1'
+    response.headers['Cache-Control'] = 'public, max-age=0'
+    return response
 
-# 	model = tf.keras.models.load_model('saved_model.h5')
+@app.route("/get_ticker")
+def first_page():
+    tmp = Path("static/prophet.png")
+    tmp_csv = Path("static/numbers.csv")
+    if tmp.is_file():
+        os.remove(tmp)
+    if tmp_csv.is_file():
+        os.remove(tmp_csv)
+    return render_template("predictor.html")
 
-# 	dataset_test = pd.read_csv('Google_Stock_Price_Test.csv')
-# 	#only the open values of the test data set
-# 	real_stock_price = dataset_test.iloc[:, 1:2].values
-# 	# print(real_stock_price)
+def yahoo_stocks(symbol, start, end):
+    return web.DataReader(symbol, 'yahoo', start, end)
 
-# 	# Getting the predicted stock price of 2017
-# 	dataset_total = pd.concat((dataset_train['Open'], dataset_test['Open']), axis = 0)
-# 	inputs = dataset_total[len(dataset_total) - len(dataset_test) - 60:].values #1199 to end
-# 	inputs = inputs.reshape(-1,1)
-# 	inputs = sc.transform(inputs)
-# 	X_test = []
+def get_historical_stock_price(stock):
+    print ("Getting historical stock prices for stock ", stock)
+    startDate = datetime.datetime(2010, 1, 4)
+    endDate = datetime.datetime(2019, 12, 3)
+    stockData = yahoo_stocks(stock, startDate, endDate)
+    return stockData
 
-# 	for i in range(60, 80):
-# 	    X_test.append(inputs[i-60:i, 0])
-# 	    # print(inputs[i-60:i, 0])
-# 	X_test = np.array(X_test)
-# 	X_test = np.reshape(X_test, (X_test.shape[0], X_test.shape[1], 1))
+@app.route("/plot" , methods = ['POST', 'GET'] )
+def main():
+    if request.method == 'POST':
+        stock = request.form['companyname']
+        df_whole = get_historical_stock_price(stock)
+
+        df = df_whole.filter(['Close'])
+        
+        df['ds'] = df.index
+        df['y'] = np.log(df['Close'])
+        original_end = df['Close'][-1]
+        
+        model = Prophet()
+        model.fit(df)
+
+        num_days = 20
+        future = model.make_future_dataframe(periods=num_days)
+        forecast = model.predict(future)
+        
+        print (forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail())
+        
+        df.set_index('ds', inplace=True)
+        forecast.set_index('ds', inplace=True)
+        
+        viz_df = df.join(forecast[['yhat', 'yhat_lower','yhat_upper']], how = 'outer')
+        viz_df['yhat_scaled'] = np.exp(viz_df['yhat'])
+
+        close_data = viz_df.Close
+        forecasted_data = viz_df.yhat_scaled
+        date = future['ds']
+        forecast_start = forecasted_data[-num_days]
+
+        d = [date, close_data, forecasted_data]
+        export_data = zip_longest(*d, fillvalue = '')
+        with open('static/numbers.csv', 'w', encoding="ISO-8859-1", newline='') as myfile:
+            wr = csv.writer(myfile)
+            wr.writerow(("Date", "Actual", "Forecasted"))
+            wr.writerows(export_data)
+        myfile.close()
+
+        return render_template("plot.html", original = round(original_end,2), forecast = round(forecast_start,2), stock_tinker = stock.upper())
 
 
-# 	predicted_stock_price = model.predict(X_test)
-# 	predicted_stock_price = sc.inverse_transform(predicted_stock_price)
-# 	result = json.dumps(predicted_stock_price.tolist())
-
-# 	plt.plot(real_stock_price, color = 'red', label = 'Real Google Stock Price')
-# 	plt.plot(predicted_stock_price, color = 'blue', label = 'Predicted Google Stock Price')
-# 	plt.title('Google Stock Price Prediction')
-# 	plt.xlabel('Time')
-# 	plt.ylabel('Google Stock Price')
-# 	plt.legend()
-	# plt.savefig("static\images\google.jpg")
-	# return render_template('google.html', google_image = "static\images\google.jpg")
-
-@app.route('/get_ticker')
-def get_ticker():
-   return render_template('ticker_form.html')
 
 
-@app.route('/time_series',methods = ['POST', 'GET'])
-def time_series():
-   if request.method == 'POST':
-	   ticker = request.form['ticker']
-	   ts = TimeSeries(key='YOUR_API_KEY', output_format='pandas')
-	   data, meta_data = ts.get_intraday(symbol=ticker,interval='1min', outputsize='full')
-	   data['4. close'].plot()
-	   plt.title('Closing price Intraday Times Series')
-	   plt.savefig("static\\images\\time.jpg")
-	   return render_template('time-series.html')
-		
-
-
-# @app.route('/time_series/<ticker>')
-# def time_series(ticker):
-# 	ts = TimeSeries(key='YOUR_API_KEY', output_format='pandas')
-# 	data, meta_data = ts.get_intraday(symbol=ticker,interval='1min', outputsize='full')
-# 	data['4. close'].plot()
-# 	plt.title('Closing price Intraday Times Series')
-# 	plt.savefig("static\\images\\time.jpg")
-# 	return render_template('time-series.html')
-
-    
 
 
 
